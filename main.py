@@ -136,16 +136,29 @@ class VideoThread(QThread):
         return 0.7 <= ratio <= 1.4
 
     def _draw_label(self, frame, x, y, text):
-        # 使用纯英文标签，避免中文字体在 OpenCV 中显示为问号
-        cv2.rectangle(frame, (x, max(0, y - 24)), (x + 190, y), (0, 255, 0), -1)
+        # 使用抗锯齿文本 + 自适应标签宽度，提升清晰度
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.58
+        thickness = 2
+        (text_w, text_h), baseline = cv2.getTextSize(text, font, font_scale, thickness)
+
+        pad_x = 6
+        pad_y = 4
+        left = max(0, x)
+        top = max(0, y - text_h - baseline - pad_y * 2)
+        right = min(frame.shape[1] - 1, left + text_w + pad_x * 2)
+        bottom = max(0, y)
+
+        cv2.rectangle(frame, (left, top), (right, bottom), (0, 255, 0), -1)
         cv2.putText(
             frame,
             text,
-            (x + 4, max(12, y - 7)),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.5,
-            (0, 0, 0),
-            1,
+            (left + pad_x, bottom - baseline - pad_y),
+            font,
+            font_scale,
+            (15, 15, 15),
+            thickness,
+            cv2.LINE_AA,
         )
 
     def run(self):
@@ -329,7 +342,7 @@ class MainWindow(QMainWindow):
         if target_size.width() <= 0 or target_size.height() <= 0:
             self.lbl_video.setPixmap(QPixmap.fromImage(qt_img))
             return
-        scaled_img = qt_img.scaled(target_size, Qt.KeepAspectRatio, Qt.FastTransformation)
+        scaled_img = qt_img.scaled(target_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         self.lbl_video.setPixmap(QPixmap.fromImage(scaled_img))
 
     def update_chart_ui(self, time_str, score):
