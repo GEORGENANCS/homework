@@ -2,6 +2,7 @@ import os
 import sys
 import cv2
 import time
+import traceback
 from datetime import datetime
 from PIL import Image
 
@@ -154,86 +155,94 @@ class VideoThread(QThread):
 
         cap = cv2.VideoCapture(source)
         if not cap.isOpened():
-            print(f"!!! 无法打开视频源: {source}")
-            return
+            print(f"!!! 无法打开视频源: {source}，尝试回退到摄像头0")
+            cap = cv2.VideoCapture(0)
+            if not cap.isOpened():
+                print("!!! 摄像头0也无法打开，线程退出")
+                return
 
         frame_count = 0
 
         while self.is_running and cap.isOpened():
-            ret, frame = cap.read()
-            if not ret:
-                cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                continue
+            try:
+                ret, frame = cap.read()
+                if not ret:
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    continue
 
-            frame_count += 1
-            should_infer = (frame_count % self.process_every_n_frames == 0)
+                frame_count += 1
+                should_infer = (frame_count % self.process_every_n_frames == 0)
 
-            # 默认用上一轮检测结果叠加，保证每帧都能刷新显示
-            current_detections = self.last_detections
+                # 默认用上一轮检测结果叠加，保证每帧都能刷新显示
+                current_detections = self.last_detections
 
-            if should_infer:
-                frame_scores = []
-                current_detections = []
+                if should_infer:
+                    frame_scores = []
+                    current_detections = []
 
-                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                faces = self.face_detector.detectMultiScale(
-                    gray,
-                    scaleFactor=1.08,
-                    minNeighbors=8,
-                    minSize=(self.min_face_size, self.min_face_size),
-                )
+                    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                    faces = self.face_detector.detectMultiScale(
+                        gray,
+                        scaleFactor=1.08,
+                        minNeighbors=8,
+                        minSize=(self.min_face_size, self.min_face_size),
+                    )
 
-                for (x, y, w, h) in faces:
-                    if not self._is_reasonable_face_box(w, h):
-                        continue
-
-                    face_img = frame[y:y + h, x:x + w]
-                    if face_img.size == 0 or self.emotion_pipe is None:
-                        continue
-
-                    try:
-                        pil_img = Image.fromarray(cv2.cvtColor(face_img, cv2.COLOR_BGR2RGB))
-                        preds = self.emotion_pipe(pil_img)
-                        if not preds:
+                    for (x, y, w, h) in faces:
+                        if not self._is_reasonable_face_box(w, h):
                             continue
 
-                        top_pred = max(preds, key=lambda item: item.get("score", 0.0))
-                        top_label = top_pred.get("label", "unknown")
-                        top_conf = float(top_pred.get("score", 0.0))
-
-                        # 低置信度直接过滤，减少“把背景当人脸”
-                        if top_conf < self.min_face_conf:
+                        face_img = frame[y:y + h, x:x + w]
+                        if face_img.size == 0 or self.emotion_pipe is None:
                             continue
 
-                        score = weighted_score_from_preds(preds)
-                        frame_scores.append(score)
+                        try:
+                            pil_img = Image.fromarray(cv2.cvtColor(face_img, cv2.COLOR_BGR2RGB))
+                            preds = self.emotion_pipe(pil_img)
+                            if not preds:
+                                continue
 
-                        emotion_en = normalize_emotion_label(top_label)
-                        label_text = f"{emotion_en} focus:{score:.0f}"
-                        current_detections.append((x, y, w, h, label_text))
-                    except Exception as e:
-                        print(f"识别出错: {e}")
+                            top_pred = max(preds, key=lambda item: item.get("score", 0.0))
+                            top_label = top_pred.get("label", "unknown")
+                            top_conf = float(top_pred.get("score", 0.0))
 
-                self.last_detections = current_detections
+                            # 低置信度直接过滤，减少“把背景当人脸”
+                            if top_conf < self.min_face_conf:
+                                continue
 
-                if frame_scores:
-                    avg_score = sum(frame_scores) / len(frame_scores)
-                    if self.smoothed_score is None:
-                        self.smoothed_score = avg_score
-                    else:
-                        self.smoothed_score = self.ema_alpha * avg_score + (1 - self.ema_alpha) * self.smoothed_score
+                            score = weighted_score_from_preds(preds)
+                            frame_scores.append(score)
 
-                    now_str = datetime.now().strftime("%H:%M:%S")
-                    self.update_chart_signal.emit(now_str, float(self.smoothed_score))
+                            emotion_en = normalize_emotion_label(top_label)
+                            label_text = f"{emotion_en} focus:{score:.0f}"
+                            current_detections.append((x, y, w, h, label_text))
+                        except Exception as e:
+                            print(f"识别出错: {e}")
 
-            for (x, y, w, h, label_text) in current_detections:
-                cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
-                self._draw_label(frame, x, y, label_text)
+                    self.last_detections = current_detections
 
-            rgb_image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            h, w, ch = rgb_image.shape
-            qt_img = QImage(rgb_image.data, w, h, ch * w, QImage.Format_RGB888)
-            self.change_pixmap_signal.emit(qt_img)
+                    if frame_scores:
+                        avg_score = sum(frame_scores) / len(frame_scores)
+                        if self.smoothed_score is None:
+                            self.smoothed_score = avg_score
+                        else:
+                            self.smoothed_score = self.ema_alpha * avg_score + (1 - self.ema_alpha) * self.smoothed_score
+
+                        now_str = datetime.now().strftime("%H:%M:%S")
+                        self.update_chart_signal.emit(now_str, float(self.smoothed_score))
+
+                for (x, y, w, h, label_text) in current_detections:
+                    cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+                    self._draw_label(frame, x, y, label_text)
+
+                rgb_image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                h, w, ch = rgb_image.shape
+                qt_img = QImage(rgb_image.data, w, h, ch * w, QImage.Format_RGB888).copy()
+                self.change_pixmap_signal.emit(qt_img)
+            except Exception:
+                print("!!! 视频线程发生异常:")
+                traceback.print_exc()
+                time.sleep(0.05)
 
         cap.release()
 
@@ -317,6 +326,9 @@ class MainWindow(QMainWindow):
 
     def update_video_ui(self, qt_img):
         target_size = self.lbl_video.size()
+        if target_size.width() <= 0 or target_size.height() <= 0:
+            self.lbl_video.setPixmap(QPixmap.fromImage(qt_img))
+            return
         scaled_img = qt_img.scaled(target_size, Qt.KeepAspectRatio, Qt.FastTransformation)
         self.lbl_video.setPixmap(QPixmap.fromImage(scaled_img))
 
