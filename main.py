@@ -218,8 +218,7 @@ class VideoThread(QThread):
             rgb_image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             h, w, ch = rgb_image.shape
             qt_img = QImage(rgb_image.data, w, h, ch * w, QImage.Format_RGB888)
-            p = qt_img.scaled(800, 600, Qt.KeepAspectRatio)
-            self.change_pixmap_signal.emit(p)
+            self.change_pixmap_signal.emit(qt_img)
 
         cap.release()
 
@@ -232,7 +231,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("智慧课堂专注度分析系统")
-        self.resize(1200, 750)
+        self.resize(1600, 900)
 
         self.setStyleSheet("""
             QMainWindow { background-color: #2b2b2b; }
@@ -267,8 +266,8 @@ class MainWindow(QMainWindow):
         data_layout.addWidget(self.web_view)
         data_group.setLayout(data_layout)
 
-        main_layout.addWidget(video_group, 6)
-        main_layout.addWidget(data_group, 4)
+        main_layout.addWidget(video_group, 7)
+        main_layout.addWidget(data_group, 3)
 
         video_source = self._resolve_video_source(os.environ.get("VIDEO_SOURCE", "0"))
         print(f">>> 当前视频源: {video_source}")
@@ -302,7 +301,9 @@ class MainWindow(QMainWindow):
         self.page_loaded = bool(ok)
 
     def update_video_ui(self, qt_img):
-        self.lbl_video.setPixmap(QPixmap.fromImage(qt_img))
+        target_size = self.lbl_video.size()
+        scaled_img = qt_img.scaled(target_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        self.lbl_video.setPixmap(QPixmap.fromImage(scaled_img))
 
     def update_chart_ui(self, time_str, score):
         if not self.page_loaded:
