@@ -1,33 +1,68 @@
+import os
 import sys
 import cv2
 import time
-import os
-import numpy as np
 from datetime import datetime
 from PIL import Image
 
 # 界面库
-from PyQt5.QtWidgets import QApplication, QMainWindow, QLabel, QVBoxLayout, QHBoxLayout, QWidget, QGroupBox
+from PyQt5.QtWidgets import (
+    QApplication,
+    QMainWindow,
+    QLabel,
+    QVBoxLayout,
+    QHBoxLayout,
+    QWidget,
+    QGroupBox,
+)
 from PyQt5.QtCore import QThread, pyqtSignal, Qt, QUrl
 from PyQt5.QtGui import QImage, QPixmap
 from PyQt5.QtWebEngineWidgets import QWebEngineView
 
 # 算法库
-from ultralytics import YOLO
-from transformers import pipeline # 替代 DeepFace
+from transformers import pipeline
+
 
 # --- 专注度计算逻辑 ---
-def calculate_score(emotion_label):
-    # 不同的模型输出标签可能略有不同，做模糊匹配
+EMOTION_SCORE_MAP = {
+    "neutral": 90,
+    "surprise": 95,
+    "happy": 75,
+    "sad": 60,
+    "fear": 30,
+    "angry": 20,
+    "disgust": 20,
+}
+
+
+def emotion_to_score(emotion_label):
     label = emotion_label.lower()
-    if 'neutral' in label: return 90    # 专注
-    if 'surprise' in label: return 95   # 惊讶（高优）
-    if 'happy' in label: return 75      # 快乐
-    if 'sad' in label: return 90        # 悲伤
-    if 'fear' in label: return 30       # 焦虑
-    if 'angry' in label: return 20      # 愤怒
-    if 'disgust' in label: return 20    # 厌恶
-    return 60 # 默认
+    for k, v in EMOTION_SCORE_MAP.items():
+        if k in label:
+            return v
+    return 60
+
+
+def weighted_score_from_preds(preds):
+    """
+    使用概率加权而非仅 top1：
+    score = Σ(情绪分值 * 置信度)
+    """
+    if not preds:
+        return 0.0
+
+    weighted_sum = 0.0
+    conf_sum = 0.0
+    for item in preds:
+        label = item.get("label", "")
+        conf = float(item.get("score", 0.0))
+        weighted_sum += emotion_to_score(label) * conf
+        conf_sum += conf
+
+    if conf_sum <= 0:
+        return 0.0
+    return weighted_sum / conf_sum
+
 
 # --- 视频处理线程 ---
 class VideoThread(QThread):
@@ -38,20 +73,29 @@ class VideoThread(QThread):
         super().__init__()
         self.video_source = video_source
         self.is_running = True
-        
-        # 1. 加载 YOLOv11
-        print(">>> 正在加载 YOLOv11 模型...")
-        try:
-            self.detector = YOLO('yolo11n.pt') 
-            print(">>> YOLOv11 加载成功")
-        except Exception as e:
-            print(f"!!! YOLO加载失败: {e}")
 
-        # 2. 加载表情识别 (Hugging Face Transformers)
+        # 参数
+        self.process_every_n_frames = 5
+        self.min_face_size = 40
+        self.ema_alpha = 0.35
+        self.smoothed_score = None
+
+        # 1) 加载 OpenCV Haar 人脸检测器（不依赖额外下载）
+        face_model = os.path.join(cv2.data.haarcascades, "haarcascade_frontalface_default.xml")
+        self.face_detector = cv2.CascadeClassifier(face_model)
+        if self.face_detector.empty():
+            print("!!! Haar人脸检测器加载失败")
+        else:
+            print(f">>> 人脸检测器加载成功: {face_model}")
+
+        # 2) 加载表情识别模型
         print(">>> 正在加载表情识别模型 (首次运行需下载)...")
         try:
-            # 使用基于 ViT 的轻量级表情模型
-            self.emotion_pipe = pipeline("image-classification", model="dima806/facial_emotions_image_detection")
+            self.emotion_pipe = pipeline(
+                "image-classification",
+                model="dima806/facial_emotions_image_detection",
+                top_k=None,
+            )
             print(">>> 表情模型加载成功")
         except Exception as e:
             print(f"!!! 表情模型加载失败: {e}")
@@ -64,81 +108,84 @@ class VideoThread(QThread):
             source = int(source)
 
         cap = cv2.VideoCapture(source)
-        
-        # 计数器，用于跳帧处理
         frame_count = 0
-        
+
         while self.is_running and cap.isOpened():
             ret, frame = cap.read()
             if not ret:
-                cap.set(cv2.CAP_PROP_POS_FRAMES, 0) # 视频结束则循环
+                cap.set(cv2.CAP_PROP_POS_FRAMES, 0)  # 视频结束则循环
                 continue
 
             frame_count += 1
-            # 每 5 帧处理一次算法，保证界面流畅
-            if frame_count % 5 != 0:
-                time.sleep(0.01) 
+            if frame_count % self.process_every_n_frames != 0:
+                time.sleep(0.01)
                 continue
 
-            # --- 核心处理流程 ---
-            # 1. YOLO 检测 (只检测人 class=0)
-            results = self.detector.predict(frame, classes=[0], verbose=False, conf=0.5)
-            
             frame_scores = []
-            
-            for result in results:
-                for box in result.boxes:
-                    x1, y1, x2, y2 = map(int, box.xyxy[0])
-                    
-                    # 简单的人脸定位策略：
-                    # YOLO检测到的是全身，我们截取上半部分作为"人脸区域"输入表情模型
-                    # (如果有 yolov8-face 模型更好，但在通用环境下这样最稳)
-                    face_h = int((y2 - y1) * 0.5) # 取顶部 1/4 高度
-                    real_y2 = y1 + face_h
-                    
-                    # 截取图像
-                    face_img = frame[y1:real_y2, x1:x2]
-                    
-                    if face_img.size == 0 or self.emotion_pipe is None:
-                        continue
 
-                    try:
-                        # 2. 表情识别
-                        # OpenCV(BGR) 转 PIL(RGB)
-                        pil_img = Image.fromarray(cv2.cvtColor(face_img, cv2.COLOR_BGR2RGB))
-                        
-                        # 推理
-                        preds = self.emotion_pipe(pil_img)
-                        # preds 格式如: [{'label': 'neutral', 'score': 0.9}, ...]
-                        top_emotion = preds[0]['label']
-                        score = calculate_score(top_emotion)
-                        frame_scores.append(score)
+            # Haar 检测需要灰度图
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            faces = self.face_detector.detectMultiScale(
+                gray,
+                scaleFactor=1.1,
+                minNeighbors=5,
+                minSize=(self.min_face_size, self.min_face_size),
+            )
 
-                        # 3. 绘制 AR 效果
-                        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2) # 全身框
-                        cv2.rectangle(frame, (x1, y1), (x2, real_y2), (255, 0, 0), 1) # 头部框
-                        
-                        # 标签背景条
-                        cv2.rectangle(frame, (x1, y1-25), (x1+150, y1), (0,255,0), -1)
-                        cv2.putText(frame, f"{top_emotion} {score}", (x1+5, y1-5), 
-                                  cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
-                                  
-                    except Exception as e:
-                        print(f"识别出错: {e}")
+            for (x, y, w, h) in faces:
+                if w < self.min_face_size or h < self.min_face_size:
+                    continue
 
-            # 4. 更新图表数据
-            avg_score = 0
+                # 裁脸
+                face_img = frame[y:y + h, x:x + w]
+                if face_img.size == 0 or self.emotion_pipe is None:
+                    continue
+
+                try:
+                    pil_img = Image.fromarray(cv2.cvtColor(face_img, cv2.COLOR_BGR2RGB))
+                    preds = self.emotion_pipe(pil_img)
+
+                    score = weighted_score_from_preds(preds)
+                    top_pred = max(preds, key=lambda item: item.get("score", 0.0)) if preds else {"label": "unknown", "score": 0.0}
+                    label = top_pred.get("label", "unknown")
+                    conf = float(top_pred.get("score", 0.0))
+
+                    # 低置信度结果降权
+                    if conf < 0.5:
+                        score *= 0.7
+
+                    frame_scores.append(score)
+
+                    # 绘制框 + 标签
+                    cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+                    cv2.rectangle(frame, (x, y - 24), (x + 170, y), (0, 255, 0), -1)
+                    cv2.putText(
+                        frame,
+                        f"{label}:{conf:.2f} {score:.0f}",
+                        (x + 4, y - 6),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.48,
+                        (0, 0, 0),
+                        1,
+                    )
+                except Exception as e:
+                    print(f"识别出错: {e}")
+
+            # 计算当帧均值 + EMA 平滑
             if frame_scores:
                 avg_score = sum(frame_scores) / len(frame_scores)
-                now_str = datetime.now().strftime("%H:%M:%S")
-                self.update_chart_signal.emit(now_str, avg_score)
+                if self.smoothed_score is None:
+                    self.smoothed_score = avg_score
+                else:
+                    self.smoothed_score = self.ema_alpha * avg_score + (1 - self.ema_alpha) * self.smoothed_score
 
-            # 5. 显示画面
+                now_str = datetime.now().strftime("%H:%M:%S")
+                self.update_chart_signal.emit(now_str, float(self.smoothed_score))
+
+            # 显示画面
             rgb_image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             h, w, ch = rgb_image.shape
-            bytes_per_line = ch * w
-            qt_img = QImage(rgb_image.data, w, h, bytes_per_line, QImage.Format_RGB888)
-            # 缩放显示
+            qt_img = QImage(rgb_image.data, w, h, ch * w, QImage.Format_RGB888)
             p = qt_img.scaled(800, 600, Qt.KeepAspectRatio)
             self.change_pixmap_signal.emit(p)
 
@@ -148,14 +195,14 @@ class VideoThread(QThread):
         self.is_running = False
         self.wait()
 
+
 # --- 主窗口 ---
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("智慧课堂专注度分析系统")
         self.resize(1200, 750)
-        
-        # 样式美化
+
         self.setStyleSheet("""
             QMainWindow { background-color: #2b2b2b; }
             QGroupBox { color: white; font-weight: bold; border: 1px solid #555; margin-top: 10px; }
@@ -182,16 +229,12 @@ class MainWindow(QMainWindow):
         data_layout = QVBoxLayout()
         self.web_view = QWebEngineView()
         self.web_view.setStyleSheet("background-color: white;")
-        
-        # 加载 HTML
-       
-        html_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "chart.html").replace('\\', '/')
 
+        html_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "chart.html").replace('\\', '/')
         self.web_view.load(QUrl(f"file:///{html_path}"))
-        self.page_loaded = False  
-        # 第一处
+        self.page_loaded = False
         self.web_view.loadFinished.connect(self.on_page_loaded)
-        
+
         data_layout.addWidget(self.web_view)
         data_group.setLayout(data_layout)
 
@@ -199,51 +242,34 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(video_group, 6)
         main_layout.addWidget(data_group, 4)
 
-        # 启动线程 (参数 '0' 代表摄像头，改成 'video.mp4' 代表视频文件)
-        self.thread = VideoThread(r"C:\Users\17387\my-app\focussys\ss\classroom1.mp4")
+        # 支持环境变量传入视频源，默认0（摄像头）
+        video_source = os.environ.get("VIDEO_SOURCE", "0")
+        self.thread = VideoThread(video_source)
         self.thread.change_pixmap_signal.connect(self.update_video_ui)
         self.thread.update_chart_signal.connect(self.update_chart_ui)
         self.thread.start()
 
     def on_page_loaded(self, ok):
         print(f">>> 页面加载: {'成功' if ok else '失败'}")
-        self.page_loaded = True
-    # 测试 echarts 是否真的加载了
-        self.web_view.page().runJavaScript(
-        "console.log('echarts loaded:', typeof echarts);"
-    )
+        self.page_loaded = bool(ok)
+
+    def update_video_ui(self, qt_img):
+        self.lbl_video.setPixmap(QPixmap.fromImage(qt_img))
 
     def update_chart_ui(self, time_str, score):
         if not self.page_loaded:
-           return
+            return
         js = f"""
         if (typeof updateChart === 'function') {{
             updateChart('{time_str}', {score});
         }}
         """
         self.web_view.page().runJavaScript(js)
-    def on_page_loaded(self, ok):
-        print(f">>> 页面加载: {'成功' if ok else '失败'}")
-        self.page_loaded = True
-            #  第二处
-
-    def update_video_ui(self, qt_img):
-        self.lbl_video.setPixmap(QPixmap.fromImage(qt_img))
-
-    # def update_chart_ui(self, time_str, score):
-    #     # 调用 JS 更新图表
-    #     js = f"updateChart('{time_str}', {score});"
-    #     self.web_view.page().runJavaScript(js)  第三处
-
-    def update_chart_ui(self, time_str, score):
-        if not self.page_loaded:
-           return
-        js = f"updateChart('{time_str}', {score});"
-        self.web_view.page().runJavaScript(js)
 
     def closeEvent(self, event):
         self.thread.stop()
         event.accept()
+
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
