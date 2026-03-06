@@ -242,12 +242,40 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(video_group, 6)
         main_layout.addWidget(data_group, 4)
 
-        # 支持环境变量传入视频源，默认0（摄像头）
-        video_source = os.environ.get("VIDEO_SOURCE", "0")
+        # 支持环境变量传入视频源：
+        # - 数字(如 "0") -> 摄像头
+        # - 文件路径 -> 视频文件
+        # 如果文件不存在，会自动回退到摄像头0
+        video_source = self._resolve_video_source(os.environ.get("VIDEO_SOURCE", "0"))
+        print(f">>> 当前视频源: {video_source}")
         self.thread = VideoThread(video_source)
         self.thread.change_pixmap_signal.connect(self.update_video_ui)
         self.thread.update_chart_signal.connect(self.update_chart_ui)
         self.thread.start()
+
+    def _resolve_video_source(self, raw_source):
+        source = str(raw_source).strip()
+
+        # 摄像头 id
+        if source.isdigit():
+            return source
+
+        # 绝对路径或当前工作目录下路径
+        if os.path.exists(source):
+            return source
+
+        # 脚本目录下路径
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        local_candidate = os.path.join(script_dir, source)
+        if os.path.exists(local_candidate):
+            return local_candidate
+
+        # 常见拼写错误提醒
+        if "chassroom" in source.lower():
+            print("!!! 检测到可能的拼写错误: 'chassroom'，你可能想写 'classroom'")
+
+        print(f"!!! 视频源不存在: {source}，已自动回退到摄像头 0")
+        return "0"
 
     def on_page_loaded(self, ok):
         print(f">>> 页面加载: {'成功' if ok else '失败'}")
