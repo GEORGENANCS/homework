@@ -146,6 +146,23 @@ class SQLiteStorage:
     def insert_face_events(self, events):
         if not events:
             return
+
+        normalized_events = []
+        for e in events:
+            normalized_events.append((
+                str(e[0]),           # session_id
+                str(e[1]),           # ts
+                int(e[2]),           # face_idx
+                int(e[3]),           # bbox_x
+                int(e[4]),           # bbox_y
+                int(e[5]),           # bbox_w
+                int(e[6]),           # bbox_h
+                str(e[7]),           # top_emotion
+                float(e[8]),         # top_confidence
+                float(e[9]),         # focus_score
+                str(e[10]),          # raw_preds_json
+            ))
+
         self.conn.executemany(
             """
             INSERT INTO face_emotion_event(
@@ -153,7 +170,7 @@ class SQLiteStorage:
                 top_emotion, top_confidence, focus_score, raw_preds_json
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            events,
+            normalized_events,
         )
         self.conn.commit()
 
@@ -305,10 +322,10 @@ class VideoThread(QThread):
                             face_events.append((
                                 self.session_id,
                                 datetime.now().isoformat(timespec="seconds"),
-                                len(face_events),
-                                x, y, w, h,
-                                emotion_en,
-                                top_conf,
+                                int(len(face_events)),
+                                int(x), int(y), int(w), int(h),
+                                str(emotion_en),
+                                float(top_conf),
                                 float(score),
                                 json.dumps(preds, ensure_ascii=False),
                             ))
