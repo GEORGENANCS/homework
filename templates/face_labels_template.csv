@@ -1,0 +1,4 @@
+image,face_id,x,y,w,h,face_valid,emotion_gt,occlusion_level,annotator
+f_00000_idx0000123_t0005.120.jpg,0,210,144,56,56,1,neutral,none,annotator_a
+f_00000_idx0000123_t0005.120.jpg,1,342,151,53,53,1,happy,light,annotator_a
+f_00001_idx0000456_t0018.240.jpg,0,198,149,58,58,1,sad,heavy,annotator_a
