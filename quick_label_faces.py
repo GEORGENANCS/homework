@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 快速人工标注脚本（半自动）：
-- 自动检测人脸框（Haar）
+- 自动检测人脸框（默认 YOLO11，可切换 Haar）
 - 你只需输入：
   1) 本图是否有人脸
   2) 每张人脸的情绪标签
@@ -22,6 +22,10 @@ from datetime import datetime
 from typing import List, Tuple
 
 import cv2
+try:
+    from ultralytics import YOLO
+except Exception:
+    YOLO = None
 
 EMOTION_KEYS = {
     "n": "neutral",
@@ -43,6 +47,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--annotator", default="annotator_a", help="标注人ID")
     parser.add_argument("--start_index", type=int, default=0, help="从第几张开始（断点续标）")
     parser.add_argument("--max_images", type=int, default=0, help="最多标注多少张，0=全部")
+    parser.add_argument("--detector", choices=["yolo11", "haar"], default="yolo11", help="人脸检测器")
+    parser.add_argument("--yolo_model", default="yolo11n-face.pt", help="YOLO11 人脸模型路径或名称")
+    parser.add_argument("--yolo_conf", type=float, default=0.25, help="YOLO 置信度阈值")
+    parser.add_argument("--yolo_iou", type=float, default=0.45, help="YOLO NMS IoU 阈值")
     return parser.parse_args()
 
 
@@ -69,7 +77,7 @@ def append_row(path: str, row: List[object]) -> None:
         writer.writerow(row)
 
 
-def detect_faces(gray_img, detector) -> List[Tuple[int, int, int, int]]:
+def detect_faces_haar(gray_img, detector) -> List[Tuple[int, int, int, int]]:
     faces = detector.detectMultiScale(
         gray_img,
         scaleFactor=1.1,
@@ -77,6 +85,24 @@ def detect_faces(gray_img, detector) -> List[Tuple[int, int, int, int]]:
         minSize=(40, 40),
     )
     return [(int(x), int(y), int(w), int(h)) for (x, y, w, h) in faces]
+
+
+def detect_faces_yolo(img_bgr, detector, conf: float, iou: float) -> List[Tuple[int, int, int, int]]:
+    results = detector.predict(source=img_bgr, conf=conf, iou=iou, verbose=False)
+    if not results:
+        return []
+    boxes = results[0].boxes
+    if boxes is None or boxes.xyxy is None:
+        return []
+
+    out: List[Tuple[int, int, int, int]] = []
+    for box in boxes.xyxy.cpu().numpy():
+        x1, y1, x2, y2 = [int(v) for v in box[:4]]
+        w = max(0, x2 - x1)
+        h = max(0, y2 - y1)
+        if w > 0 and h > 0:
+            out.append((x1, y1, w, h))
+    return out
 
 
 def draw_faces(img, faces):
@@ -87,7 +113,7 @@ def draw_faces(img, faces):
     return canvas
 
 
-def wait_preview_key(window_name: str) -> bool:
+def wait_preview_key() -> bool:
     """
     在标注前等待用户确认，避免 OpenCV 窗口事件循环与终端 input() 交替时卡住。
     返回 True 表示继续，False 表示退出。
@@ -145,10 +171,17 @@ def main() -> None:
         "image", "has_face", "detected_face_count", "annotator", "labeled_at"
     ])
 
-    model_path = os.path.join(cv2.data.haarcascades, "haarcascade_frontalface_default.xml")
-    detector = cv2.CascadeClassifier(model_path)
-    if detector.empty():
-        raise RuntimeError(f"无法加载人脸检测器: {model_path}")
+    if args.detector == "haar":
+        model_path = os.path.join(cv2.data.haarcascades, "haarcascade_frontalface_default.xml")
+        detector = cv2.CascadeClassifier(model_path)
+        if detector.empty():
+            raise RuntimeError(f"无法加载 Haar 人脸检测器: {model_path}")
+        print(f"检测器: Haar ({model_path})")
+    else:
+        if YOLO is None:
+            raise RuntimeError("未安装 ultralytics，无法使用 yolo11。请先执行: pip install ultralytics")
+        detector = YOLO(args.yolo_model)
+        print(f"检测器: YOLO11 ({args.yolo_model}), conf={args.yolo_conf}, iou={args.yolo_iou}")
 
     print(f"开始标注，共 {len(images)} 张图片")
     print("提示：先在窗口按 Enter/Space，再到终端输入标签。")
@@ -161,12 +194,15 @@ def main() -> None:
             print(f"[跳过] 读取失败: {name}")
             continue
 
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        faces = detect_faces(gray, detector)
+        if args.detector == "haar":
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            faces = detect_faces_haar(gray, detector)
+        else:
+            faces = detect_faces_yolo(img, detector, args.yolo_conf, args.yolo_iou)
 
         canvas = draw_faces(img, faces)
         cv2.imshow("quick_label_faces", canvas)
-        if not wait_preview_key("quick_label_faces"):
+        if not wait_preview_key():
             print("\n用户主动结束标注。")
             break
 
