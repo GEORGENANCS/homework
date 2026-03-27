@@ -87,6 +87,20 @@ def draw_faces(img, faces):
     return canvas
 
 
+def wait_preview_key(window_name: str) -> bool:
+    """
+    在标注前等待用户确认，避免 OpenCV 窗口事件循环与终端 input() 交替时卡住。
+    返回 True 表示继续，False 表示退出。
+    """
+    print("  在图片窗口按 Enter/Space 开始标注，按 q 退出。")
+    while True:
+        key = cv2.waitKey(50) & 0xFF
+        if key in (13, 32):  # Enter / Space
+            return True
+        if key in (ord("q"), 27):  # q / Esc
+            return False
+
+
 def ask_yes_no(prompt: str) -> bool:
     while True:
         v = input(prompt).strip().lower()
@@ -137,7 +151,8 @@ def main() -> None:
         raise RuntimeError(f"无法加载人脸检测器: {model_path}")
 
     print(f"开始标注，共 {len(images)} 张图片")
-    print("提示：窗口按任意键继续下一张；终端输入用于记录标签。")
+    print("提示：先在窗口按 Enter/Space，再到终端输入标签。")
+    cv2.namedWindow("quick_label_faces", cv2.WINDOW_NORMAL)
 
     for i, name in enumerate(images, start=1):
         path = os.path.join(args.image_dir, name)
@@ -151,7 +166,9 @@ def main() -> None:
 
         canvas = draw_faces(img, faces)
         cv2.imshow("quick_label_faces", canvas)
-        cv2.waitKey(1)
+        if not wait_preview_key("quick_label_faces"):
+            print("\n用户主动结束标注。")
+            break
 
         print(f"\n[{i}/{len(images)}] {name} | 自动检测到人脸数: {len(faces)}")
         has_face = ask_yes_no("本图是否有人脸? (y/n): ")
