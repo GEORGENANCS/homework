@@ -26,6 +26,8 @@ from PyQt5.QtWebEngineWidgets import QWebEngineView
 from transformers import pipeline
 from ultralytics import YOLO
 
+from focus_mapping import FocusEstimator, normalize_emotion_label
+
 try:
     import torch
 except Exception:
@@ -33,16 +35,6 @@ except Exception:
 
 
 # --- 专注度计算逻辑 ---
-EMOTION_SCORE_MAP = {
-    "neutral": 90,
-    "surprise": 95,
-    "happy": 75,
-    "sad": 60,
-    "fear": 30,
-    "angry": 20,
-    "disgust": 20,
-}
-
 EMOTION_CN_MAP = {
     "neutral": "平静",
     "surprise": "惊讶",
@@ -54,45 +46,9 @@ EMOTION_CN_MAP = {
 }
 
 
-def normalize_emotion_label(emotion_label):
-    label = emotion_label.lower()
-    for k in EMOTION_SCORE_MAP:
-        if k in label:
-            return k
-    return "unknown"
-
-
-def emotion_to_score(emotion_label):
-    key = normalize_emotion_label(emotion_label)
-    return EMOTION_SCORE_MAP.get(key, 60)
-
-
 def emotion_to_cn(emotion_label):
     key = normalize_emotion_label(emotion_label)
     return EMOTION_CN_MAP.get(key, "未知")
-
-
-def weighted_score_from_preds(preds):
-    """
-    使用概率加权而非仅 top1：
-    score = Σ(情绪分值 * 置信度)
-    """
-    if not preds:
-        return 0.0
-
-    weighted_sum = 0.0
-    conf_sum = 0.0
-    for item in preds:
-        label = item.get("label", "")
-        conf = float(item.get("score", 0.0))
-        weighted_sum += emotion_to_score(label) * conf
-        conf_sum += conf
-
-    if conf_sum <= 0:
-        return 0.0
-    return weighted_sum / conf_sum
-
-
 
 
 class SQLiteStorage:
@@ -196,6 +152,13 @@ class VideoThread(QThread):
         self.ema_alpha = 0.35
         self.smoothed_score = None
         self.last_detections = []  # [(x,y,w,h,label_text), ...]
+
+        mapping_path = os.environ.get("FOCUS_MAPPING_PATH", "focus_mapping_calibrated.json")
+        self.focus_estimator, loaded = FocusEstimator.from_json_path(mapping_path)
+        if loaded:
+            print(f">>> 专注度映射: 已加载标定文件 {mapping_path}")
+        else:
+            print(">>> 专注度映射: 使用默认规则映射")
 
         self.face_detector_name = os.environ.get("FACE_DETECTOR", "yolo11").strip().lower()
         if self.face_detector_name == "haar":
@@ -351,7 +314,7 @@ class VideoThread(QThread):
                             if top_conf < self.min_face_conf:
                                 continue
 
-                            score = weighted_score_from_preds(preds)
+                            score = self.focus_estimator.weighted_score_from_preds(preds)
                             frame_scores.append(score)
 
                             emotion_en = normalize_emotion_label(top_label)
