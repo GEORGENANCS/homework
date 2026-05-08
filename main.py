@@ -24,6 +24,7 @@ from PyQt5.QtWebEngineWidgets import QWebEngineView
 
 # 算法库
 from transformers import pipeline
+from ultralytics import YOLO
 
 try:
     import torch
@@ -196,12 +197,22 @@ class VideoThread(QThread):
         self.smoothed_score = None
         self.last_detections = []  # [(x,y,w,h,label_text), ...]
 
-        face_model = os.path.join(cv2.data.haarcascades, "haarcascade_frontalface_default.xml")
-        self.face_detector = cv2.CascadeClassifier(face_model)
-        if self.face_detector.empty():
-            print("!!! Haar人脸检测器加载失败")
+        self.face_detector_name = os.environ.get("FACE_DETECTOR", "yolo11").strip().lower()
+        if self.face_detector_name == "haar":
+            face_model = os.path.join(cv2.data.haarcascades, "haarcascade_frontalface_default.xml")
+            self.face_detector = cv2.CascadeClassifier(face_model)
+            if self.face_detector.empty():
+                raise RuntimeError(f"Haar人脸检测器加载失败: {face_model}")
+            print(f">>> 人脸检测器: Haar ({face_model})")
+            self.yolo_conf = 0.0
+            self.yolo_iou = 0.0
         else:
-            print(f">>> 人脸检测器加载成功: {face_model}")
+            yolo_model = os.environ.get("YOLO_FACE_MODEL", "yolo11n-face.pt")
+            self.yolo_conf = float(os.environ.get("YOLO_FACE_CONF", "0.25"))
+            self.yolo_iou = float(os.environ.get("YOLO_FACE_IOU", "0.45"))
+            self.face_detector = YOLO(yolo_model)
+            self.face_detector_name = "yolo11"
+            print(f">>> 人脸检测器: YOLO11 ({yolo_model}), conf={self.yolo_conf}, iou={self.yolo_iou}")
 
         print(">>> 正在加载表情识别模型 (首次运行需下载)...")
         device_id = 0 if (torch is not None and torch.cuda.is_available()) else -1
@@ -223,6 +234,42 @@ class VideoThread(QThread):
             return False
         ratio = w / float(h)
         return 0.7 <= ratio <= 1.4
+
+    def _detect_faces(self, frame):
+        if self.face_detector_name == "haar":
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            raw_faces = self.face_detector.detectMultiScale(
+                gray,
+                scaleFactor=1.08,
+                minNeighbors=8,
+                minSize=(self.min_face_size, self.min_face_size),
+            )
+            return [(int(x), int(y), int(w), int(h)) for (x, y, w, h) in raw_faces if self._is_reasonable_face_box(w, h)]
+
+        results = self.face_detector.predict(
+            source=frame,
+            conf=self.yolo_conf,
+            iou=self.yolo_iou,
+            verbose=False,
+        )
+        if not results:
+            return []
+
+        boxes = results[0].boxes
+        if boxes is None or boxes.xyxy is None:
+            return []
+
+        faces = []
+        for box in boxes.xyxy.cpu().numpy():
+            x1, y1, x2, y2 = [int(v) for v in box[:4]]
+            w = max(0, x2 - x1)
+            h = max(0, y2 - y1)
+            if w <= 0 or h <= 0:
+                continue
+            if not self._is_reasonable_face_box(w, h):
+                continue
+            faces.append((x1, y1, w, h))
+        return faces
 
     def _draw_label(self, frame, x, y, text):
         # 使用抗锯齿文本 + 自适应标签宽度，提升清晰度
@@ -283,18 +330,9 @@ class VideoThread(QThread):
                     face_events = []
                     current_detections = []
 
-                    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                    faces = self.face_detector.detectMultiScale(
-                        gray,
-                        scaleFactor=1.08,
-                        minNeighbors=8,
-                        minSize=(self.min_face_size, self.min_face_size),
-                    )
+                    faces = self._detect_faces(frame)
 
                     for (x, y, w, h) in faces:
-                        if not self._is_reasonable_face_box(w, h):
-                            continue
-
                         face_img = frame[y:y + h, x:x + w]
                         if face_img.size == 0 or self.emotion_pipe is None:
                             continue
