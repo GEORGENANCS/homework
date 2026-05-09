@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
 快速人工标注脚本（半自动）：
-- 自动检测人脸框（默认 YOLO11，可切换 Haar）
+- 自动检测人脸框（仅 YOLO11）
 - 你只需输入：
   1) 本图是否有人脸
   2) 每张人脸的情绪标签
+  3) （可选）本图专注度等级 high/mid/low
 
 输出：
 - face_emotions_manual.csv   (每张人脸一行)
@@ -48,6 +49,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--yolo_model", default="yolo11n-face.pt", help="YOLO11 人脸模型路径或名称")
     parser.add_argument("--yolo_conf", type=float, default=0.25, help="YOLO 置信度阈值")
     parser.add_argument("--yolo_iou", type=float, default=0.45, help="YOLO NMS IoU 阈值")
+    parser.add_argument("--label_focus", action="store_true", help="在帧级标注中追加专注度 high/mid/low")
     return parser.parse_args()
 
 
@@ -133,6 +135,21 @@ def ask_emotion(face_idx: int) -> str:
         print("  无效键，请重输")
 
 
+def ask_focus_level() -> str:
+    """返回 high/mid/low，或空字符串(跳过)。"""
+    while True:
+        key = input("本图专注度键(h:high / m:mid / l:low / Enter跳过): ").strip().lower()
+        if key == "":
+            return ""
+        if key == "h":
+            return "high"
+        if key == "m":
+            return "mid"
+        if key == "l":
+            return "low"
+        print("  无效键，请重输")
+
+
 def main() -> None:
     args = parse_args()
 
@@ -155,7 +172,7 @@ def main() -> None:
         "image", "face_id", "x", "y", "w", "h", "emotion_gt", "annotator", "labeled_at"
     ])
     ensure_csv(args.frame_csv, [
-        "image", "has_face", "detected_face_count", "annotator", "labeled_at"
+        "image", "has_face", "detected_face_count", "focus_level_gt", "annotator", "labeled_at"
     ])
 
     detector = YOLO(args.yolo_model)
@@ -184,7 +201,8 @@ def main() -> None:
         has_face = ask_yes_no("本图是否有人脸? (y/n): ")
 
         now = datetime.now().isoformat(timespec="seconds")
-        append_row(args.frame_csv, [name, int(has_face), len(faces), args.annotator, now])
+        focus_level_gt = ask_focus_level() if args.label_focus else ""
+        append_row(args.frame_csv, [name, int(has_face), len(faces), focus_level_gt, args.annotator, now])
 
         if has_face and faces:
             for fid, (x, y, w, h) in enumerate(faces):

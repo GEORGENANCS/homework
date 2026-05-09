@@ -13,7 +13,7 @@
 
 ## 快速开始
 1. 抽帧：`python extract_frames.py --video your.mp4 --out_dir frames_out --every_n 10`
-2. 标注情绪：`python quick_label_faces.py --image_dir frames_out`
+2. 标注情绪（可选同时标注专注度）：`python quick_label_faces.py --image_dir frames_out --label_focus`
 3. 标注专注度：`python label_focus.py --image_dir frames_out`
 4. 拟合映射：`python fit_focus_mapping.py --face_csv face_emotions_manual.csv --frame_csv frame_focus_manual.csv`
 5. 实时运行：`python main.py`
