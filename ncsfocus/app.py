@@ -26,7 +26,11 @@ from PyQt5.QtWebEngineWidgets import QWebEngineView
 from transformers import pipeline
 from ultralytics import YOLO
 
-from ncsfocus.focus_mapping import FocusEstimator, normalize_emotion_label
+if __package__ in (None, ""):
+    sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+    from focus_mapping import FocusEstimator, normalize_emotion_label
+else:
+    from ncsfocus.focus_mapping import FocusEstimator, normalize_emotion_label
 
 import torch
 
@@ -446,12 +450,15 @@ class MainWindow(QMainWindow):
         if not self.page_loaded:
             return
         js = f"""
-        if (typeof updateChart === 'function') {{
-            updateChart('{time_str}', {score});
-        }}
+        (function() {{
+            if (typeof updateChart === 'function') {{
+                updateChart('{time_str}', {score});
+                return 'ok';
+            }}
+            return 'missing_updateChart';
+        }})();
         """
-        self.web_view.page().runJavaScript(js)
-
+        self.web_view.page().runJavaScript(js, lambda result: print(f"[chart-js] {result}"))
     def closeEvent(self, event):
         self.thread.stop()
         event.accept()
