@@ -451,11 +451,70 @@ class MainWindow(QMainWindow):
             return
         js = f"""
         (function() {{
-            if (typeof updateChart === 'function') {{
-                updateChart('{time_str}', {score});
-                return 'ok';
+            function ensureFallbackChart() {{
+                if (window.__focusFallbackReady) return;
+
+                document.body.innerHTML = '' +
+                    '<div style="font-family: Arial, sans-serif; padding: 8px;">' +
+                    '<div style="font-weight: 600; margin-bottom: 6px;">课堂专注度实时曲线</div>' +
+                    '<div id="meta" style="font-size: 12px; color: #666; margin-bottom: 6px;">等待数据中...</div>' +
+                    '<canvas id="focusCanvas" width="520" height="320" style="width:100%;height:320px;border:1px solid #ddd;"></canvas>' +
+                    '</div>';
+
+                window.__focusTimes = [];
+                window.__focusScores = [];
+                window.__focusMaxPoints = 120;
+
+                window.updateChart = function(t, s) {{
+                    var v = Math.max(0, Math.min(100, Number(s)));
+                    window.__focusTimes.push(t);
+                    window.__focusScores.push(v);
+                    if (window.__focusTimes.length > window.__focusMaxPoints) {{
+                        window.__focusTimes.shift();
+                        window.__focusScores.shift();
+                    }}
+
+                    var meta = document.getElementById('meta');
+                    if (meta) meta.textContent = '当前分数: ' + v.toFixed(2) + '   点数: ' + window.__focusScores.length;
+
+                    var c = document.getElementById('focusCanvas');
+                    if (!c) return;
+                    var ctx = c.getContext('2d');
+                    var w = c.width, h = c.height;
+                    var pad = {{left: 34, right: 10, top: 10, bottom: 24}};
+
+                    ctx.clearRect(0, 0, w, h);
+                    ctx.strokeStyle = '#999';
+                    ctx.lineWidth = 1;
+                    ctx.beginPath();
+                    ctx.moveTo(pad.left, pad.top);
+                    ctx.lineTo(pad.left, h - pad.bottom);
+                    ctx.lineTo(w - pad.right, h - pad.bottom);
+                    ctx.stroke();
+
+                    if (!window.__focusScores.length) return;
+                    var plotW = w - pad.left - pad.right;
+                    var plotH = h - pad.top - pad.bottom;
+                    ctx.strokeStyle = '#2d8cf0';
+                    ctx.lineWidth = 2;
+                    ctx.beginPath();
+                    for (var i = 0; i < window.__focusScores.length; i++) {{
+                        var x = pad.left + (i / Math.max(1, window.__focusScores.length - 1)) * plotW;
+                        var y = pad.top + (100 - window.__focusScores[i]) / 100 * plotH;
+                        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+                    }}
+                    ctx.stroke();
+                }};
+
+                window.__focusFallbackReady = true;
             }}
-            return 'missing_updateChart';
+
+            if (typeof updateChart !== 'function') {{
+                ensureFallbackChart();
+            }}
+
+            updateChart('{time_str}', {score});
+            return 'ok';
         }})();
         """
         self.web_view.page().runJavaScript(js, lambda result: print(f"[chart-js] {result}"))
