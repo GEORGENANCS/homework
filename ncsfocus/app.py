@@ -505,6 +505,36 @@ class MainWindow(QMainWindow):
         self.btn_start.setEnabled(True)
         self.btn_stop.setEnabled(False)
 
+    def on_page_loaded(self, ok):
+        self.page_loaded = bool(ok)
+        if ok:
+            self.update_status("图表页面加载成功")
+        else:
+            self.update_status("图表页面加载失败")
+
+    def update_video_ui(self, qt_img):
+        target_size = self.lbl_video.size()
+        if target_size.width() <= 0 or target_size.height() <= 0:
+            self.lbl_video.setPixmap(QPixmap.fromImage(qt_img))
+            return
+        scaled_img = qt_img.scaled(target_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        self.lbl_video.setPixmap(QPixmap.fromImage(scaled_img))
+
+    def update_chart_ui(self, time_str, score):
+        if not self.page_loaded:
+            return
+        safe_time = str(time_str).replace("'", "\'")
+        try:
+            safe_score = float(score)
+        except Exception:
+            return
+        js = f"""
+        if (typeof updateChart === 'function') {{
+            updateChart('{safe_time}', {safe_score});
+        }}
+        """
+        self.web_view.page().runJavaScript(js)
+
     def update_status(self, msg):
         self.status_label.setText(f"状态：{msg}")
 
