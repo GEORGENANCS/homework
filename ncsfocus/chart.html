@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>课堂专注度曲线</title>
+  <style>
+    html, body { margin:0; padding:0; width:100%; height:100%; background:#fff; font-family: Arial, sans-serif; }
+    #wrap { width:100%; height:100%; display:flex; flex-direction:column; }
+    #title { padding:8px 12px; font-size:14px; font-weight:600; color:#333; border-bottom:1px solid #eee; }
+    #meta { padding:4px 12px; color:#666; font-size:12px; }
+    #canvasBox { flex:1; padding:8px 10px 10px; }
+    canvas { width:100%; height:100%; border:1px solid #eee; }
+  </style>
+</head>
+<body>
+  <div id="wrap">
+    <div id="title">课堂专注度实时曲线</div>
+    <div id="meta">等待数据中...</div>
+    <div id="canvasBox"><canvas id="focusCanvas"></canvas></div>
+  </div>
+
+  <script>
+    const times = [];
+    const scores = [];
+    const MAX_POINTS = 120;
+
+    const meta = document.getElementById('meta');
+    const canvas = document.getElementById('focusCanvas');
+    const ctx = canvas.getContext('2d');
+
+    function resizeCanvas() {
+      const rect = canvas.getBoundingClientRect();
+      canvas.width = Math.max(300, Math.floor(rect.width));
+      canvas.height = Math.max(220, Math.floor(rect.height));
+      draw();
+    }
+
+    function draw() {
+      const w = canvas.width;
+      const h = canvas.height;
+      const pad = { left: 34, right: 10, top: 10, bottom: 24 };
+      ctx.clearRect(0, 0, w, h);
+
+      ctx.strokeStyle = '#999';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(pad.left, pad.top);
+      ctx.lineTo(pad.left, h - pad.bottom);
+      ctx.lineTo(w - pad.right, h - pad.bottom);
+      ctx.stroke();
+
+      ctx.fillStyle = '#666';
+      ctx.font = '12px Arial';
+      for (let v = 0; v <= 100; v += 20) {
+        const y = pad.top + (100 - v) / 100 * (h - pad.top - pad.bottom);
+        ctx.strokeStyle = '#eee';
+        ctx.beginPath();
+        ctx.moveTo(pad.left, y);
+        ctx.lineTo(w - pad.right, y);
+        ctx.stroke();
+        ctx.fillText(String(v), 5, y + 4);
+      }
+
+      if (!scores.length) return;
+
+      const plotW = w - pad.left - pad.right;
+      const plotH = h - pad.top - pad.bottom;
+      ctx.strokeStyle = '#2d8cf0';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      for (let i = 0; i < scores.length; i++) {
+        const x = pad.left + (i / Math.max(1, scores.length - 1)) * plotW;
+        const y = pad.top + (100 - scores[i]) / 100 * plotH;
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+    }
+
+    function updateChart(t, s) {
+      const v = Math.max(0, Math.min(100, Number(s)));
+      times.push(t);
+      scores.push(v);
+      if (times.length > MAX_POINTS) {
+        times.shift();
+        scores.shift();
+      }
+      meta.textContent = `当前分数: ${v.toFixed(2)}   点数: ${scores.length}`;
+      draw();
+    }
+
+    window.updateChart = updateChart;
+    window.addEventListener('resize', resizeCanvas);
+    resizeCanvas();
+  </script>
+</body>
+</html>
