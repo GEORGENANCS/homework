@@ -30,13 +30,9 @@ from PyQt5.QtWebEngineWidgets import QWebEngineView
 from transformers import pipeline
 from ultralytics import YOLO
 
-# 兼容两种运行方式：
-# 1) 包方式: python -m ncsfocus.app
-# 2) 脚本方式: python app.py
-if __package__:
-    from .focus_mapping import FocusEstimator, normalize_emotion_label
-else:
-    from focus_mapping import FocusEstimator, normalize_emotion_label
+# 当前仓库实际以脚本目录运行（例如 ss/app.py），
+# 统一使用同目录导入，避免 VS Code/Pylance 报 missing import。
+from focus_mapping import FocusEstimator, normalize_emotion_label
 
 import torch
 
