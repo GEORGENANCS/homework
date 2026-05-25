@@ -17,16 +17,22 @@ from PyQt5.QtWidgets import (
     QHBoxLayout,
     QWidget,
     QGroupBox,
+    QPushButton,
+    QComboBox,
+    QFileDialog,
+    QMessageBox,
 )
 from PyQt5.QtCore import QThread, pyqtSignal, Qt, QUrl
-from PyQt5.QtGui import QImage, QPixmap
+from PyQt5.QtGui import QImage, QPixmap, QDesktopServices
 from PyQt5.QtWebEngineWidgets import QWebEngineView
 
 # 算法库
 from transformers import pipeline
 from ultralytics import YOLO
 
-from ncsfocus.focus_mapping import FocusEstimator, normalize_emotion_label
+# 当前仓库实际以脚本目录运行（例如 ss/app.py），
+# 统一使用同目录导入，避免 VS Code/Pylance 报 missing import。
+from focus_mapping import FocusEstimator, normalize_emotion_label
 
 import torch
 
@@ -134,6 +140,7 @@ class SQLiteStorage:
 class VideoThread(QThread):
     change_pixmap_signal = pyqtSignal(QImage)
     update_chart_signal = pyqtSignal(str, float)
+    status_signal = pyqtSignal(str)
 
     def __init__(self, video_source, session_id, db_path):
         super().__init__()
@@ -244,11 +251,10 @@ class VideoThread(QThread):
 
         cap = cv2.VideoCapture(source)
         if not cap.isOpened():
-            print(f"!!! 无法打开视频源: {source}，尝试回退到摄像头0")
-            cap = cv2.VideoCapture(0)
-            if not cap.isOpened():
-                print("!!! 摄像头0也无法打开，线程退出")
-                return
+            msg = f"无法打开视频源: {source}"
+            print(f"!!! {msg}")
+            self.status_signal.emit(msg)
+            return
 
         frame_count = 0
 
@@ -256,8 +262,9 @@ class VideoThread(QThread):
             try:
                 ret, frame = cap.read()
                 if not ret:
-                    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                    continue
+                    if isinstance(source, int):
+                        continue
+                    break
 
                 frame_count += 1
                 should_infer = (frame_count % self.process_every_n_frames == 0)
@@ -350,11 +357,13 @@ class VideoThread(QThread):
                 time.sleep(0.05)
 
         cap.release()
+        self.status_signal.emit("视频处理已停止")
 
     def stop(self):
         self.is_running = False
         self.wait()
         self.storage.close()
+
 
 
 class MainWindow(QMainWindow):
@@ -363,23 +372,68 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("智慧课堂专注度分析系统")
         self.resize(1600, 900)
 
+        self.thread = None
+        self.selected_video_file = ""
+        self.current_source = "0"
+        self.db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "focus_data.db")
+
         self.setStyleSheet("""
             QMainWindow { background-color: #2b2b2b; }
             QGroupBox { color: white; font-weight: bold; border: 1px solid #555; margin-top: 10px; }
             QGroupBox::title { subcontrol-origin: margin; subcontrol-position: top center; padding: 0 5px; }
+            QPushButton { padding: 8px 12px; }
+            QComboBox { padding: 6px 8px; background: #fff; }
         """)
 
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
+        root_layout = QVBoxLayout()
+        central_widget.setLayout(root_layout)
+
+        # 顶部控制栏
+        ctrl_group = QGroupBox(" 控制面板 (Control Panel) ")
+        ctrl_layout = QHBoxLayout()
+        self.source_combo = QComboBox()
+        self.source_combo.addItems(["摄像头 0", "视频文件"])
+
+        self.btn_pick_file = QPushButton("选择视频文件")
+        self.btn_pick_file.clicked.connect(self.pick_video_file)
+
+        self.btn_start = QPushButton("开始分析")
+        self.btn_start.clicked.connect(self.start_analysis)
+
+        self.btn_stop = QPushButton("停止分析")
+        self.btn_stop.clicked.connect(self.stop_analysis)
+        self.btn_stop.setEnabled(False)
+
+        self.btn_open_report_dir = QPushButton("打开报告目录")
+        self.btn_open_report_dir.clicked.connect(self.open_report_dir)
+
+        self.btn_generate_report = QPushButton("生成离线报告")
+        self.btn_generate_report.clicked.connect(self.generate_report)
+
+        self.status_label = QLabel("状态：就绪")
+        self.status_label.setStyleSheet("color: #ddd;")
+
+        ctrl_layout.addWidget(self.source_combo)
+        ctrl_layout.addWidget(self.btn_pick_file)
+        ctrl_layout.addWidget(self.btn_start)
+        ctrl_layout.addWidget(self.btn_stop)
+        ctrl_layout.addWidget(self.btn_generate_report)
+        ctrl_layout.addWidget(self.btn_open_report_dir)
+        ctrl_layout.addWidget(self.status_label, 1)
+        ctrl_group.setLayout(ctrl_layout)
+        root_layout.addWidget(ctrl_group)
+
+        # 主显示区域
         main_layout = QHBoxLayout()
-        central_widget.setLayout(main_layout)
 
         video_group = QGroupBox(" 实时视频监控 (Real-time Monitor) ")
         video_layout = QVBoxLayout()
         self.lbl_video = QLabel()
         self.lbl_video.setAlignment(Qt.AlignCenter)
         self.lbl_video.setStyleSheet("background-color: #1a1a1a; border-radius: 5px;")
-        self.lbl_video.setText("正在初始化模型，请稍候...")
+        self.lbl_video.setText("请选择视频源并点击“开始分析”")
         video_layout.addWidget(self.lbl_video)
         video_group.setLayout(video_layout)
 
@@ -398,41 +452,65 @@ class MainWindow(QMainWindow):
 
         main_layout.addWidget(video_group, 7)
         main_layout.addWidget(data_group, 3)
+        root_layout.addLayout(main_layout)
 
-        video_source = self._resolve_video_source(os.environ.get("VIDEO_SOURCE", "0"))
+    def pick_video_file(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择视频文件",
+            os.path.dirname(os.path.abspath(__file__)),
+            "Video Files (*.mp4 *.avi *.mov *.mkv);;All Files (*)",
+        )
+        if file_path:
+            self.selected_video_file = file_path
+            self.source_combo.setCurrentText("视频文件")
+            self.status_label.setText(f"状态：已选择视频 {os.path.basename(file_path)}")
+
+    def _build_source(self):
+        if self.source_combo.currentText() == "摄像头 0":
+            return "0"
+        if not self.selected_video_file:
+            raise ValueError("请选择视频文件")
+        return self.selected_video_file
+
+    def start_analysis(self):
+        if self.thread is not None and self.thread.isRunning():
+            QMessageBox.information(self, "提示", "分析已在运行")
+            return
+        try:
+            source = self._build_source()
+        except ValueError as e:
+            QMessageBox.warning(self, "缺少输入", str(e))
+            return
+
         session_id = datetime.now().strftime("session_%Y%m%d_%H%M%S")
-        db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "focus_data.db")
-        print(f">>> 当前视频源: {video_source}")
-        print(f">>> 当前会话ID: {session_id}")
-        print(f">>> 数据库存储: {db_path}")
-        self.thread = VideoThread(video_source, session_id, db_path)
+        self.current_source = source
+        self.thread = VideoThread(source, session_id, self.db_path)
         self.thread.change_pixmap_signal.connect(self.update_video_ui)
         self.thread.update_chart_signal.connect(self.update_chart_ui)
+        self.thread.status_signal.connect(self.update_status)
+        self.thread.finished.connect(self.on_analysis_finished)
         self.thread.start()
 
-    def _resolve_video_source(self, raw_source):
-        source = str(raw_source).strip()
+        self.status_label.setText(f"状态：运行中 | session={session_id}")
+        self.btn_start.setEnabled(False)
+        self.btn_stop.setEnabled(True)
 
-        if source.isdigit():
-            return source
+    def stop_analysis(self):
+        if self.thread is None:
+            return
+        self.thread.stop()
 
-        if os.path.exists(source):
-            return source
-
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        local_candidate = os.path.join(script_dir, source)
-        if os.path.exists(local_candidate):
-            return local_candidate
-
-        if "chassroom" in source.lower():
-            print("!!! 检测到可能的拼写错误: 'chassroom'，你可能想写 'classroom'")
-
-        print(f"!!! 视频源不存在: {source}，已自动回退到摄像头 0")
-        return "0"
+    def on_analysis_finished(self):
+        self.btn_start.setEnabled(True)
+        self.btn_stop.setEnabled(False)
 
     def on_page_loaded(self, ok):
-        print(f">>> 页面加载: {'成功' if ok else '失败'}")
         self.page_loaded = bool(ok)
+        if ok:
+            self.update_status("图表页面加载成功")
+        else:
+            self.update_status("图表页面加载失败")
 
     def update_video_ui(self, qt_img):
         target_size = self.lbl_video.size()
@@ -445,16 +523,36 @@ class MainWindow(QMainWindow):
     def update_chart_ui(self, time_str, score):
         if not self.page_loaded:
             return
+        safe_time = str(time_str).replace("'", "\'")
+        try:
+            safe_score = float(score)
+        except Exception:
+            return
         js = f"""
         if (typeof updateChart === 'function') {{
-            updateChart('{time_str}', {score});
+            updateChart('{safe_time}', {safe_score});
         }}
         """
         self.web_view.page().runJavaScript(js)
 
-    def closeEvent(self, event):
-        self.thread.stop()
-        event.accept()
+    def update_status(self, msg):
+        self.status_label.setText(f"状态：{msg}")
+
+    def open_report_dir(self):
+        report_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "report_out")
+        os.makedirs(report_dir, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(report_dir))
+
+    def generate_report(self):
+        try:
+            from generate_report import main as report_main
+            old = list(sys.argv)
+            sys.argv = ["generate_report.py", "--db", self.db_path, "--out_dir", os.path.join(os.path.dirname(os.path.abspath(__file__)), "report_out")]
+            report_main()
+            sys.argv = old
+            QMessageBox.information(self, "完成", "报告已生成到 report_out")
+        except Exception as e:
+            QMessageBox.critical(self, "报告失败", str(e))
 
 
 def main() -> None:
