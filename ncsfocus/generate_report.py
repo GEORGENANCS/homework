@@ -31,7 +31,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--db", default="focus_data.db", help="SQLite 数据库路径")
     parser.add_argument("--session_id", default="", help="指定会话ID，留空则使用最近会话")
     parser.add_argument("--out_dir", default="report_out", help="报告输出目录")
-    parser.add_argument("--risk_threshold", type=float, default=60.0, help="低专注阈值")
+    parser.add_argument("--risk_threshold", type=float, default=(65.0 + 40.0) / 2.0, help="低专注阈值，默认取(mid+low)/2=52.5")
     return parser.parse_args()
 
 
