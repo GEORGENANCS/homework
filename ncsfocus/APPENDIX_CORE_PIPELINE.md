@@ -144,3 +144,152 @@ while 视频仍可读取:
 
 - 若论文正文实验最终采用 `min_size=32`，需同步修改代码默认值或在文中注明“实验参数覆盖运行默认值”。
 - 建议在附录中同时给出参数配置来源（环境变量 / 启动参数）以增强可复现性。
+
+
+## E. SQLite 表结构规范（附录可直接引用）
+
+以下给出推荐的规范化表结构，用于保证“帧级汇总表 + 人脸事件表”的可追溯性、可检索性与可复现性。
+
+### E.1 帧级汇总表：`frame_summary`
+
+**建表 SQL（建议版）**
+
+```sql
+CREATE TABLE IF NOT EXISTS frame_summary (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    ts TEXT NOT NULL,
+    face_count INTEGER NOT NULL,
+    avg_focus_score REAL,
+    smoothed_focus_score REAL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+);
+```
+
+**字段说明**
+
+| 字段名 | 类型 | 约束 | 说明 |
+|---|---|---|---|
+| id | INTEGER | PRIMARY KEY AUTOINCREMENT | 自增主键 |
+| session_id | TEXT | NOT NULL | 一次分析会话唯一标识 |
+| ts | TEXT | NOT NULL | 帧时间戳（建议 ISO8601） |
+| face_count | INTEGER | NOT NULL | 当前帧有效人脸数 |
+| avg_focus_score | REAL | NULLABLE | 当前帧原始平均专注度 |
+| smoothed_focus_score | REAL | NULLABLE | EMA 平滑后专注度 |
+| created_at | TEXT | NOT NULL | 入库时间 |
+
+**索引建议**
+
+```sql
+CREATE INDEX IF NOT EXISTS idx_frame_summary_session_ts
+ON frame_summary(session_id, ts);
+
+CREATE INDEX IF NOT EXISTS idx_frame_summary_session
+ON frame_summary(session_id);
+```
+
+**存储样例**
+
+| id | session_id | ts | face_count | avg_focus_score | smoothed_focus_score | created_at |
+|---:|---|---|---:|---:|---:|---|
+| 1 | session_20260526_101530 | 2026-05-26T10:15:31.240 | 18 | 68.42 | 67.95 | 2026-05-26 10:15:31 |
+| 2 | session_20260526_101530 | 2026-05-26T10:15:31.440 | 17 | 66.90 | 67.58 | 2026-05-26 10:15:31 |
+
+---
+
+### E.2 人脸事件表：`face_emotion_event`
+
+**建表 SQL（建议版）**
+
+```sql
+CREATE TABLE IF NOT EXISTS face_emotion_event (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    ts TEXT NOT NULL,
+    face_idx INTEGER NOT NULL,
+    bbox_x INTEGER NOT NULL,
+    bbox_y INTEGER NOT NULL,
+    bbox_w INTEGER NOT NULL,
+    bbox_h INTEGER NOT NULL,
+    top_emotion TEXT NOT NULL,
+    top_confidence REAL NOT NULL,
+    focus_score REAL,
+    raw_preds_json TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+);
+```
+
+**字段说明**
+
+| 字段名 | 类型 | 约束 | 说明 |
+|---|---|---|---|
+| id | INTEGER | PRIMARY KEY AUTOINCREMENT | 自增主键 |
+| session_id | TEXT | NOT NULL | 对应分析会话ID |
+| ts | TEXT | NOT NULL | 事件时间戳（帧时刻） |
+| face_idx | INTEGER | NOT NULL | 同一帧内人脸序号 |
+| bbox_x / bbox_y | INTEGER | NOT NULL | 人脸框左上角坐标 |
+| bbox_w / bbox_h | INTEGER | NOT NULL | 人脸框宽高 |
+| top_emotion | TEXT | NOT NULL | top-1 情绪标签 |
+| top_confidence | REAL | NOT NULL | top-1 情绪置信度 |
+| focus_score | REAL | NULLABLE | 该人脸专注度分数 |
+| raw_preds_json | TEXT | NULLABLE | 全部情绪概率分布 JSON |
+| created_at | TEXT | NOT NULL | 入库时间 |
+
+**索引建议**
+
+```sql
+CREATE INDEX IF NOT EXISTS idx_face_event_session_ts
+ON face_emotion_event(session_id, ts);
+
+CREATE INDEX IF NOT EXISTS idx_face_event_session_emotion
+ON face_emotion_event(session_id, top_emotion);
+
+CREATE INDEX IF NOT EXISTS idx_face_event_session_faceidx
+ON face_emotion_event(session_id, face_idx);
+```
+
+**存储样例**
+
+| id | session_id | ts | face_idx | bbox_x | bbox_y | bbox_w | bbox_h | top_emotion | top_confidence | focus_score | raw_preds_json |
+|---:|---|---|---:|---:|---:|---:|---:|---|---:|---:|---|
+| 1 | session_20260526_101530 | 2026-05-26T10:15:31.240 | 0 | 412 | 186 | 64 | 64 | neutral | 0.81 | 71.34 | [{"label":"neutral","score":0.81},{"label":"happy","score":0.12},...] |
+| 2 | session_20260526_101530 | 2026-05-26T10:15:31.240 | 1 | 528 | 194 | 58 | 58 | sad | 0.67 | 49.86 | [{"label":"sad","score":0.67},{"label":"neutral","score":0.19},...] |
+
+---
+
+### E.3 主外键与一致性建议
+
+- 主键：两表均采用 `id INTEGER PRIMARY KEY AUTOINCREMENT`。
+- 逻辑关联键：`session_id + ts` 可将某一帧的汇总信息与该帧所有人脸事件关联。
+- 若需强约束，可增加唯一键：
+
+```sql
+CREATE UNIQUE INDEX IF NOT EXISTS uq_face_event_frame_face
+ON face_emotion_event(session_id, ts, face_idx);
+```
+
+---
+
+### E.4 查询示例（论文可附）
+
+**查询某会话的分钟级专注度趋势**
+
+```sql
+SELECT SUBSTR(ts,1,16) AS minute_bucket,
+       AVG(smoothed_focus_score) AS minute_focus,
+       AVG(face_count) AS minute_faces
+FROM frame_summary
+WHERE session_id = ?
+GROUP BY minute_bucket
+ORDER BY minute_bucket;
+```
+
+**查询某会话情绪分布**
+
+```sql
+SELECT top_emotion, COUNT(*) AS cnt
+FROM face_emotion_event
+WHERE session_id = ?
+GROUP BY top_emotion
+ORDER BY cnt DESC;
+```
