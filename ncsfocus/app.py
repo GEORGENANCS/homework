@@ -156,6 +156,8 @@ class VideoThread(QThread):
         self.ema_alpha = 0.35
         self.smoothed_score = None
         self.last_detections = []  # [(x,y,w,h,label_text), ...]
+        self.start_pos_msec = 0.0
+        self.last_pos_msec = 0.0
 
         mapping_path = os.environ.get("FOCUS_MAPPING_PATH", "focus_mapping_calibrated.json")
         self.focus_estimator, loaded = FocusEstimator.from_json_path(mapping_path)
@@ -256,6 +258,9 @@ class VideoThread(QThread):
             self.status_signal.emit(msg)
             return
 
+        if not isinstance(source, int) and self.start_pos_msec > 0:
+            cap.set(cv2.CAP_PROP_POS_MSEC, float(self.start_pos_msec))
+
         frame_count = 0
 
         while self.is_running and cap.isOpened():
@@ -267,6 +272,8 @@ class VideoThread(QThread):
                     break
 
                 frame_count += 1
+                if not isinstance(source, int):
+                    self.last_pos_msec = float(cap.get(cv2.CAP_PROP_POS_MSEC) or 0.0)
                 should_infer = (frame_count % self.process_every_n_frames == 0)
 
                 # 默认用上一轮检测结果叠加，保证每帧都能刷新显示
@@ -375,6 +382,7 @@ class MainWindow(QMainWindow):
         self.thread = None
         self.selected_video_file = ""
         self.current_source = "0"
+        self.resume_pos_by_source = {}
         self.db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "focus_data.db")
 
         self.setStyleSheet("""
@@ -392,7 +400,10 @@ class MainWindow(QMainWindow):
 
         # 顶部控制栏
         ctrl_group = QGroupBox(" 控制面板 (Control Panel) ")
+        ctrl_group.setMaximumHeight(105)
         ctrl_layout = QHBoxLayout()
+        ctrl_layout.setContentsMargins(10, 8, 10, 8)
+        ctrl_layout.setSpacing(8)
         self.source_combo = QComboBox()
         self.source_combo.addItems(["摄像头 0", "视频文件"])
 
@@ -486,13 +497,18 @@ class MainWindow(QMainWindow):
         session_id = datetime.now().strftime("session_%Y%m%d_%H%M%S")
         self.current_source = source
         self.thread = VideoThread(source, session_id, self.db_path)
+        if isinstance(source, str) and source != "0":
+            self.thread.start_pos_msec = float(self.resume_pos_by_source.get(source, 0.0))
         self.thread.change_pixmap_signal.connect(self.update_video_ui)
         self.thread.update_chart_signal.connect(self.update_chart_ui)
         self.thread.status_signal.connect(self.update_status)
         self.thread.finished.connect(self.on_analysis_finished)
         self.thread.start()
 
-        self.status_label.setText(f"状态：运行中 | session={session_id}")
+        resume_hint = ""
+        if isinstance(source, str) and source != "0" and self.thread.start_pos_msec > 0:
+            resume_hint = f" | 从{self.thread.start_pos_msec/1000:.1f}s续播"
+        self.status_label.setText(f"状态：运行中 | session={session_id}{resume_hint}")
         self.btn_start.setEnabled(False)
         self.btn_stop.setEnabled(True)
 
@@ -500,6 +516,8 @@ class MainWindow(QMainWindow):
         if self.thread is None:
             return
         self.thread.stop()
+        if isinstance(self.current_source, str) and self.current_source != "0":
+            self.resume_pos_by_source[self.current_source] = float(getattr(self.thread, "last_pos_msec", 0.0))
 
     def on_analysis_finished(self):
         self.btn_start.setEnabled(True)
