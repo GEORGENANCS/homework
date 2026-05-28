@@ -221,11 +221,21 @@ def save_plots(
         paths["focus_trend_png"] = trend_png
 
     if emotion_rows:
-        labels = [r[0] for r in emotion_rows]
-        sizes = [r[1] for r in emotion_rows]
-        plt.figure(figsize=(6, 6))
+        # 饼图仅保留占比最高的3类，其余合并为“其他”，避免小扇区标签重叠
+        sorted_rows = sorted(emotion_rows, key=lambda x: x[1], reverse=True)
+        top3 = sorted_rows[:3]
+        rest = sorted_rows[3:]
+
+        labels = [r[0] for r in top3]
+        sizes = [r[1] for r in top3]
+        rest_total = sum(r[1] for r in rest)
+        if rest_total > 0:
+            labels.append("其他")
+            sizes.append(rest_total)
+
+        plt.figure(figsize=(7, 6))
         plt.pie(sizes, labels=labels, autopct="%1.1f%%", startangle=90)
-        plt.title("Emotion Distribution")
+        plt.title("Emotion Distribution (Top 3 + Other)")
         plt.tight_layout()
         emo_png = os.path.join(out_dir, "emotion_distribution.png")
         plt.savefig(emo_png, dpi=150)
