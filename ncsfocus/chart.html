@@ -24,6 +24,8 @@
     const times = [];
     const scores = [];
     const MAX_POINTS = 120;
+    const Y_MIN = 40;
+    const Y_MAX = 85;
 
     const meta = document.getElementById('meta');
     const canvas = document.getElementById('focusCanvas');
@@ -52,8 +54,8 @@
 
       ctx.fillStyle = '#666';
       ctx.font = '12px Arial';
-      for (let v = 0; v <= 100; v += 20) {
-        const y = pad.top + (100 - v) / 100 * (h - pad.top - pad.bottom);
+      for (let v = Y_MIN; v <= Y_MAX; v += 5) {
+        const y = pad.top + (Y_MAX - v) / (Y_MAX - Y_MIN) * (h - pad.top - pad.bottom);
         ctx.strokeStyle = '#eee';
         ctx.beginPath();
         ctx.moveTo(pad.left, y);
@@ -71,7 +73,7 @@
       ctx.beginPath();
       for (let i = 0; i < scores.length; i++) {
         const x = pad.left + (i / Math.max(1, scores.length - 1)) * plotW;
-        const y = pad.top + (100 - scores[i]) / 100 * plotH;
+        const y = pad.top + (Y_MAX - scores[i]) / (Y_MAX - Y_MIN) * plotH;
         if (i === 0) ctx.moveTo(x, y);
         else ctx.lineTo(x, y);
       }
@@ -79,7 +81,7 @@
     }
 
     function updateChart(t, s) {
-      const v = Math.max(0, Math.min(100, Number(s)));
+      const v = Math.max(Y_MIN, Math.min(Y_MAX, Number(s)));
       times.push(t);
       scores.push(v);
       if (times.length > MAX_POINTS) {
