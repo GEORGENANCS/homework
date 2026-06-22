@@ -31,7 +31,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--db", default="focus_data.db", help="SQLite 数据库路径")
     parser.add_argument("--session_id", default="", help="指定会话ID，留空则使用最近会话")
     parser.add_argument("--out_dir", default="report_out", help="报告输出目录")
-    parser.add_argument("--risk_threshold", type=float, default=60.0, help="低专注阈值")
+    parser.add_argument("--risk_threshold", type=float, default=(65.0 + 40.0) / 2.0, help="低专注阈值，默认取(mid+low)/2=52.5")
     return parser.parse_args()
 
 
@@ -221,11 +221,21 @@ def save_plots(
         paths["focus_trend_png"] = trend_png
 
     if emotion_rows:
-        labels = [r[0] for r in emotion_rows]
-        sizes = [r[1] for r in emotion_rows]
-        plt.figure(figsize=(6, 6))
+        # 饼图仅保留占比最高的3类，其余合并为“其他”，避免小扇区标签重叠
+        sorted_rows = sorted(emotion_rows, key=lambda x: x[1], reverse=True)
+        top3 = sorted_rows[:3]
+        rest = sorted_rows[3:]
+
+        labels = [r[0] for r in top3]
+        sizes = [r[1] for r in top3]
+        rest_total = sum(r[1] for r in rest)
+        if rest_total > 0:
+            labels.append("其他")
+            sizes.append(rest_total)
+
+        plt.figure(figsize=(7, 6))
         plt.pie(sizes, labels=labels, autopct="%1.1f%%", startangle=90)
-        plt.title("Emotion Distribution")
+        plt.title("Emotion Distribution (Top 3 + Other)")
         plt.tight_layout()
         emo_png = os.path.join(out_dir, "emotion_distribution.png")
         plt.savefig(emo_png, dpi=150)
